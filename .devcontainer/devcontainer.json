@@ -7,12 +7,6 @@
       "version": "latest",
       "tflint": "latest",
       "terragrunt": "latest"
-    },
-    "ghcr.io/bartventer/arch-devcontainer-features/terraform:1": {
-      "enableShellCompletion": true,
-      "installTerragrunt": true,
-      "installTerraformDocs": true,
-      "tflint": "latest"
     }
   }
 }
