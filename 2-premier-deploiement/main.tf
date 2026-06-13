@@ -1,117 +1,94 @@
-data "proxmox_virtual_environment_vms" "template" {
-  node_name = var.target_node
-  tags      = ["template", var.template_tag]
+
+resource "random_pet" "prefix" {}
+
+resource "azurerm_resource_group" "RG1" {
+  name     = "${var.prefixRG}-demoVM-TF-${random_pet.prefix.id}"
+  location = var.location_RG
 }
 
-data "proxmox_virtual_environment_pool" "tf_pool" {
-  pool_id = "Mentorat_Terraform"
+resource "azurerm_virtual_network" "main" {
+  name                = "${var.prefixVM}-vnet"
+  address_space       = ["10.0.0.0/16"]
+  location            = azurerm_resource_group.RG1.location
+  resource_group_name = azurerm_resource_group.RG1.name
 }
 
-resource "random_integer" "id_vm" {
-  max = 1000
-  min = 500
+resource "azurerm_subnet" "internal" {
+  name                 = "internal"
+  resource_group_name  = azurerm_resource_group.RG1.name
+  virtual_network_name = azurerm_virtual_network.main.name
+  address_prefixes     = ["10.0.2.0/24"]
 }
 
-resource "proxmox_virtual_environment_vm" "vm" {
-  name      = "${var.vm_hostname}${random_integer.id_vm.result}"
-  node_name = var.target_node
-  vm_id     = random_integer.id_vm.result
-  # on_boot = var.onboot
-  pool_id = data.proxmox_virtual_environment_pool.tf_pool.id
+resource "azurerm_network_security_group" "nsg" {
+  name                = "${var.prefixVM}-nsg"
+  location            = azurerm_resource_group.RG1.location
+  resource_group_name = azurerm_resource_group.RG1.name
 
-  agent {
-    enabled = false
+  security_rule {
+    name                       = "access_internet"
+    priority                   = 100
+    direction                  = "Inbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_range     = "22"
+    source_address_prefix      = "*"
+    destination_address_prefix = "*"
   }
 
-  stop_on_destroy = true
-  tags            = var.vm_tags
-
-  startup {
-    order      = "3"
-    up_delay   = "60"
-    down_delay = "60"
+  tags = {
+    environment = "demo"
   }
-
-  cpu {
-    # utiliser le type de cpu par defaut qui est qemu64
-    # type    = "x86-64-v2-AES"
-    cores   = var.cores
-    sockets = var.sockets
-    # flags   = []
-  }
-
-  memory {
-    dedicated = var.memory
-  }
-
-  network_device {
-    bridge = "vmbr3"
-    model  = "virtio"
-  }
-
-  # Ignore changes to the network
-  ## MAC address is generated on every apply, causing
-  ## TF to think this needs to be rebuilt on every apply
-  lifecycle {
-    ignore_changes = [
-      network_device,
-    ]
-  }
-
-  boot_order    = ["scsi0", "ide2", "net0"]
-  scsi_hardware = "virtio-scsi-single"
-
-  disk {
-    interface    = "scsi0"
-    iothread     = true
-    datastore_id = var.disk.storage
-    size         = var.disk.size
-    discard      = "ignore"
-  }
-
-  clone {
-    vm_id = data.proxmox_virtual_environment_vms.template.vms[0].vm_id
-  }
-
-  #   initialization {
-  # ip_config {
-  #   ipv4 {
-  #     address = "dhcp"
-  #   }
-  # }
-
-  #     datastore_id         = "local"
-  #     interface            = "ide2"
-  #     user_data_file_id    = proxmox_virtual_environment_file.cloud_user_config.id
-  #     meta_data_file_id    = proxmox_virtual_environment_file.cloud_meta_config.id
-  #   }
 }
 
-# resource "proxmox_virtual_environment_file" "cloud_user_config" {
-#   content_type = "snippets"
-#   datastore_id = "local"
-#   node_name    = var.target_node
+resource "azurerm_network_interface" "nic" {
+  name                = "${var.prefixVM}-nic"
+  location            = azurerm_resource_group.RG1.location
+  resource_group_name = azurerm_resource_group.RG1.name
 
-#   source_raw {
-#     data = file("cloud-init/user_data")
+  ip_configuration {
+    name                          = "${var.prefixVM}-ipconf"
+    subnet_id                     = azurerm_subnet.internal.id
+    private_ip_address_allocation = "Dynamic"
+    # public_ip_address_id          = azurerm_public_ip.pip.id
+  }
+}
 
-#     file_name = "${var.vm_hostname}.${var.domain}-ci-user.yml"
-#   }
-# }
+resource "azurerm_network_interface_security_group_association" "nsg_assoc" {
+  network_interface_id      = azurerm_network_interface.nic.id
+  network_security_group_id = azurerm_network_security_group.nsg.id
+}
 
-# resource "proxmox_virtual_environment_file" "cloud_meta_config" {
-#   content_type = "snippets"
-#   datastore_id = "local"
-#   node_name    = var.target_node
+resource "azurerm_linux_virtual_machine" "vmlinux" {
+  name                = "${var.prefixVM}-vm-02"
+  resource_group_name = azurerm_resource_group.RG1.name
+  location            = azurerm_resource_group.RG1.location
+  size                = "Standard_B1s"
+  admin_username      = "adminuser"
+  network_interface_ids = [
+    azurerm_network_interface.nic.id,
+  ]
 
-#   source_raw {
-#     data = templatefile("cloud-init/meta_data",
-#       {
-#         instance_id    = sha1(var.vm_hostname)
-#         local_hostname = var.vm_hostname
-#       }
-#     )
+  admin_ssh_key {
+    username   = "adminuser"
+    public_key = azapi_resource_action.ssh_public_key_gen.output.publicKey
+  }
 
-#     file_name = "${var.vm_hostname}.${var.domain}-ci-meta_data.yml"
-#   }
-# }
+  os_disk {
+    caching              = "ReadWrite"
+    storage_account_type = "Standard_LRS"
+  }
+
+  source_image_reference {
+    publisher = "Canonical"
+    offer     = "0001-com-ubuntu-server-jammy"
+    sku       = "22_04-lts"
+    version   = "latest"
+  }
+  tags = {
+    environment = "demo"
+    demo        = "Terraform"
+    vm          = "linux"
+  }
+}
